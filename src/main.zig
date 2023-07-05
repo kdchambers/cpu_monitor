@@ -141,10 +141,9 @@ fn load_stat_line(line: []const u8) !Stat {
     return stat;
 }
 
-const max_stat_count = 16;
-var stat_buffer: [max_stat_count]Stat = undefined;
+fn load_stat(stat_buffer: []Stat) ![]Stat {
+    assert(stat_buffer.len >= 12);
 
-fn load_stat() ![]Stat {
     const stat_handle = try std.fs.openFileAbsolute("/proc/stat", .{});
     const file_stat = try stat_handle.stat();
 
@@ -167,7 +166,6 @@ fn load_stat() ![]Stat {
             break :outer;
         };
         const line = text_buffer[line_start..line_end];
-        std.log.info("Stat for line: {s}", .{line});
         stat_buffer[cpu_count] = try load_stat_line(line);
         cpu_count += 1;
 
@@ -178,16 +176,19 @@ fn load_stat() ![]Stat {
 }
 
 pub fn main() !void {
-    const cpu_stats = try load_stat();
-
-    _ = cpu_stats;
-
-    // var stat_0 = try load_stat();
-    // while (true) {
-    //     std.time.sleep(std.time.ns_per_s);
-    //     const stat_1 = try load_stat();
-    //     const load_percentage = calculate_load(stat_0, stat_1);
-    //     std.debug.print("{d:.2}%\n", .{load_percentage});
-    //     stat_0 = stat_1;
-    // }
+    const max_stat_count = 32;
+    var stat_buffer: [max_stat_count]Stat = undefined;
+    var buffer_offset: usize = 0;
+    var prev_stats = try load_stat(stat_buffer[buffer_offset..]);
+    while (true) {
+        buffer_offset = (buffer_offset + @divExact(max_stat_count, 2)) % max_stat_count;
+        std.time.sleep(std.time.ns_per_s);
+        const next_stats = try load_stat(stat_buffer[buffer_offset..]);
+        for (prev_stats, next_stats, 0..) |prev_stat, next_stat, i| {
+            const percentage = calculate_load(prev_stat, next_stat);
+            std.debug.print("  cpu_{d} :: {d:.2}\n", .{ i, percentage });
+        }
+        std.debug.print("\n", .{});
+        prev_stats = next_stats;
+    }
 }
