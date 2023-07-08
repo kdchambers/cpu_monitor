@@ -1,9 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-// const max_line_size = 512;
-// var line_buffer: [max_line_size]u8 = undefined;
-
 const text_buffer_size = 1024;
 var text_buffer: [text_buffer_size]u8 = undefined;
 
@@ -176,19 +173,84 @@ fn load_stat(stat_buffer: []Stat) ![]Stat {
 }
 
 pub fn main() !void {
-    const max_stat_count = 32;
-    var stat_buffer: [max_stat_count]Stat = undefined;
-    var buffer_offset: usize = 0;
-    var prev_stats = try load_stat(stat_buffer[buffer_offset..]);
-    while (true) {
-        buffer_offset = (buffer_offset + @divExact(max_stat_count, 2)) % max_stat_count;
-        std.time.sleep(std.time.ns_per_s);
-        const next_stats = try load_stat(stat_buffer[buffer_offset..]);
-        for (prev_stats, next_stats, 0..) |prev_stat, next_stat, i| {
-            const percentage = calculate_load(prev_stat, next_stat);
-            std.debug.print("  cpu_{d} :: {d:.2}\n", .{ i, percentage });
-        }
-        std.debug.print("\n", .{});
-        prev_stats = next_stats;
-    }
+    const allocator = std.heap.c_allocator;
+    var thread_monitor = try ThreadUtilMonitor.init(allocator);
+    std.log.info("Thread count: {d}", .{thread_monitor.perc_buffer.len});
+
+    // const max_stat_count = 32;
+    // var stat_buffer: [max_stat_count]Stat = undefined;
+    // var buffer_offset: usize = 0;
+    // var prev_stats = try load_stat(stat_buffer[buffer_offset..]);
+    // while (true) {
+    //     buffer_offset = (buffer_offset + @divExact(max_stat_count, 2)) % max_stat_count;
+    //     std.time.sleep(std.time.ns_per_s);
+    //     const next_stats = try load_stat(stat_buffer[buffer_offset..]);
+    //     for (prev_stats, next_stats, 0..) |prev_stat, next_stat, i| {
+    //         const percentage = calculate_load(prev_stat, next_stat);
+    //         std.debug.print("  cpu_{d} :: {d:.2}\n", .{ i, percentage });
+    //     }
+    //     std.debug.print("\n", .{});
+    //     prev_stats = next_stats;
+    // }
 }
+
+const ThreadUtilMonitor = struct {
+    stat_buffer: []Stat,
+    perc_buffer: []f32,
+    offset: u32,
+    thread_count: u32,
+
+    pub fn init(allocator: std.mem.Allocator) !@This() {
+        const stat_handle = try std.fs.openFileAbsolute("/proc/stat", .{});
+        defer stat_handle.close();
+
+        const file_stat = try stat_handle.stat();
+
+        if (file_stat.size > text_buffer_size) {
+            return error.StatFileTooLarge;
+        }
+
+        const bytes_read = try stat_handle.read(&text_buffer);
+
+        var thread_count: usize = 0;
+        var i: usize = 0;
+        while (i < bytes_read) : (i += 1) {
+            if (text_buffer[i] == '\n') {
+                thread_count += 1;
+            }
+        }
+
+        // The first line is just an aggregate of all the threads.
+        thread_count -= 1;
+
+        var stat_buffer = try allocator.alloc(Stat, thread_count * 2);
+        var perc_buffer = try allocator.alloc(f32, thread_count);
+
+        _ = load_stat(stat_buffer[0..thread_count]);
+
+        return @This(){
+            .stat_buffer = stat_buffer,
+            .perc_buffer = perc_buffer,
+            .offset = 0,
+            .thread_count = thread_count,
+        };
+    }
+
+    pub fn deinit(self: *@This(), allocator: std.mem.allocator) void {
+        allocator.free(self.perc_buffer);
+        allocator.free(self.stat_buffer);
+        self.offset = undefined;
+        self.thread_count = undefined;
+    }
+
+    pub fn update(self: *@This()) []f32 {
+        const previous_stats = self.stat_buffer[self.offset .. self.offset + self.thread_count];
+        const next_offset = (self.offset + self.thread_count) % (self.thread_count * 2);
+        const stats = load_stat(self.stat_buffer[next_offset .. next_offset + self.thread_count]);
+        for (previous_stats, stats, 0..) |prev, current, i| {
+            self.perc_buffer[i] = calculate_load(prev, current);
+        }
+        self.offset = next_offset;
+        return self.perc_buffer;
+    }
+};
